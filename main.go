@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	dir := flag.String("dir", ".", "cookie file or folder to scan recursively")
+	dir := flag.String("dir", "cookies", "cookie file or folder to scan recursively (default: cookies/)")
 	pattern := flag.String("pattern", "cookie_*.txt", "base-name glob when -dir is a folder")
 	proxiesPath := flag.String("proxies", "proxies.txt", "proxy list file (used only if it exists)")
 	proxyMode := flag.String("proxy-mode", "sticky", "sticky (pin file to one static proxy) or rotating (round-robin endpoints)")

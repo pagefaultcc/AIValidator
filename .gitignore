@@ -1,4 +1,8 @@
-# Secrets: cookie files carry real claude.ai session keys. NEVER commit them.
+# Secrets: cookie files carry real claude.ai session keys. Keep them ONLY in
+# the gitignored cookies/ directory — never commit them under any name.
+/cookies/
+
+# Belt-and-braces for stray cookie files anywhere else in the tree.
 cookie_*.txt
 message.txt
 *.cookies

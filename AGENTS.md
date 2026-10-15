@@ -19,10 +19,11 @@ go build ./...        # compile
 go vet ./...          # vet — must be clean before any commit
 go test ./...         # unit tests — must pass before any commit
 gofmt -w .            # format (goimports-style; run before committing)
-go run . -dir .       # validate cookie_*.txt in cwd against live claude.ai
+go run .             # validate files in cookies/ (default -dir) against live claude.ai
 ```
 
-Useful flags: `-dir` (file or folder), `-pattern` (default `cookie_*.txt`),
+Useful flags: `-dir` (file or folder; default `cookies/`), `-pattern` (default
+`cookie_*.txt`),
 `-workers` (default 5), `-timeout` (default 30s, per request), `-proxies`
 (default `proxies.txt`, used only if the file exists), `-proxy-mode`
 (`sticky|rotating`), `-endpoint` (default `https://claude.ai`; exists so tests
@@ -144,14 +145,16 @@ classification.
    file, 0 hits for pre-check failures.
 2. Proxy path: point `proxies.txt` at a second local server port; sticky shows
    `proxy: <host:port> (sticky)`, rotating round-robins across endpoints.
-3. Real cookies: `go run . -dir cookie_00004.txt`. NEVER print, log, or commit
+3. Real cookies: `go run . -dir cookies/<file>.txt`. NEVER print, log, or commit
    cookie values. Never run more than a few hundred live requests per minute;
    `/api/account` 429s are expected under concurrency and are not a bug.
 
 ## Secrets policy (critical)
 
-- `cookie_*.txt`, `message.txt`, and any fixture dirs are **gitignored**;
-  several contain real `sk-ant-sid02-…` session keys.
+- **All session cookies live in `cookies/` — gitignored wholesale.** Any file
+  in there can carry a real `sk-ant-sid02-…` session key under an arbitrary
+  name, so nothing inside is ever committed. Stray-cookie patterns
+  (`cookie_*.txt`, `message.txt`, `*.cookies`) are also ignored as belt-and-braces.
 - Never commit, echo, screenshot, or paste cookie values. When generating test
   fixtures from real files, transform them (e.g. replace the sessionKey value)
   and still treat the result as sensitive — copies of `cf_clearance` and other
