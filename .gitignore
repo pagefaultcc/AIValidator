@@ -1,0 +1,19 @@
+# Secrets: cookie files carry real claude.ai session keys. NEVER commit them.
+cookie_*.txt
+message.txt
+*.cookies
+
+# Build artifacts
+claude-validator
+/dist/
+
+# macOS
+.DS_Store
+
+# Test scratch
+fixtures/
+fixtures_rot/
+livefixtures/
+burst/
+bench/
+tmp_serve/
