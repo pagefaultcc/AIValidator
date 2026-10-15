@@ -304,13 +304,22 @@ def validate_session(cookie_jar: dict, proxy_list: list = None, max_proxy_attemp
 
             email = user.get("email", "Active User")
             account = session_json.get("account") or {}
-            plan_type = account.get("plan_type", "Free / Standard").capitalize()
-
+            
             # Step 2: Backend-API verification probe
             claims = decode_jwt(access_token)
             account_id = (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_account_id")
+            jwt_plan = (claims.get("https://api.openai.com/auth") or {}).get("plan_type")
             exp_ts = claims.get("exp")
             expiry_str = format_expiry(exp_ts)
+
+            # OpenAI returns camelCase 'planType' (e.g. 'plus', 'team', 'pro', 'free') in /session
+            raw_plan = (
+                account.get("planType")
+                or account.get("plan_type")
+                or jwt_plan
+                or "free"
+            )
+            plan_type = str(raw_plan).capitalize()
 
             auth_headers = {
                 "Authorization": f"Bearer {access_token}",
