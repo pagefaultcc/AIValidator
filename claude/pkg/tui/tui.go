@@ -20,6 +20,20 @@ type (
 	tickMsg    struct{}
 )
 
+// ScanFunc runs one full scan (discover, parse, worker pump) for a folder and
+// returns the discovered rows plus the streaming results channel.
+type ScanFunc func(dir, pattern string) ([]string, []*cookie.CookieFile, <-chan validator.Result, error)
+
+// scanStartedMsg carries a finished scan: rows ready, workers running.
+type scanStartedMsg struct {
+	dir     string
+	paths   []string
+	parsed  []*cookie.CookieFile
+	results <-chan validator.Result
+}
+
+type scanErrorMsg struct{ err error }
+
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // maxShownRows caps the interactive list: above this size the TUI switches to a
@@ -95,19 +109,17 @@ type Model struct {
 	blocked    int
 	errCount   int
 	headless   bool
+
+	// Interactive mode (-tui): folder prompt state.
+	scan    ScanFunc
+	prompt  bool
+	input   string
+	hint    string
+	lastDir string
 }
 
 func NewModel(paths []string, parsed []*cookie.CookieFile, endpoint, mode string, nProxies, workers int, results <-chan validator.Result) Model {
-	rows := make([]row, len(paths))
-	byPath := make(map[string]int, len(paths))
-	for i, p := range paths {
-		rows[i] = row{path: p, cf: parsed[i]}
-		byPath[p] = i
-	}
-	return Model{
-		paths:    paths,
-		rows:     rows,
-		byPath:   byPath,
+	m := Model{
 		endpoint: endpoint,
 		mode:     mode,
 		nProxies: nProxies,
@@ -115,6 +127,52 @@ func NewModel(paths []string, parsed []*cookie.CookieFile, endpoint, mode string
 		results:  results,
 		headless: !isCharDevice(os.Stdout),
 	}
+	m.resetRun(paths, parsed, results)
+	return m
+}
+
+// NewInteractiveModel starts in prompt state; -tui users pick the folder there.
+func NewInteractiveModel(scan ScanFunc, endpoint, mode string, nProxies, workers int) Model {
+	return Model{
+		scan:     scan,
+		prompt:   true,
+		input:    "cookies",
+		lastDir:  "cookies",
+		endpoint: endpoint,
+		mode:     mode,
+		nProxies: nProxies,
+		workers:  workers,
+	}
+}
+
+// resetRun (re)initializes all per-run state for a freshly discovered set.
+func (m *Model) resetRun(paths []string, parsed []*cookie.CookieFile, results <-chan validator.Result) {
+	rows := make([]row, len(paths))
+	byPath := make(map[string]int, len(paths))
+	for i, p := range paths {
+		rows[i] = row{path: p, cf: parsed[i]}
+		byPath[p] = i
+	}
+	m.paths = paths
+	m.rows = rows
+	m.byPath = byPath
+	m.recent = nil
+	if results != nil {
+		m.results = results
+	}
+	m.spinnerIdx = 0
+	m.done = false
+	m.valid, m.invalid, m.expired, m.rateLim, m.blocked, m.errCount = 0, 0, 0, 0, 0, 0
+}
+
+// toPrompt returns to the folder-choosing state after a finished run.
+func (m *Model) toPrompt() {
+	m.prompt = true
+	m.input = m.lastDir
+	m.hint = ""
+	m.paths, m.rows, m.byPath, m.recent, m.results = nil, nil, nil, nil, nil
+	m.done = false
+	m.valid, m.invalid, m.expired, m.rateLim, m.blocked, m.errCount = 0, 0, 0, 0, 0, 0
 }
 
 func isCharDevice(f *os.File) bool {
@@ -139,25 +197,52 @@ func waitForResult(ch <-chan validator.Result) tea.Cmd {
 		return resultMsg(res)
 	}
 }
-
 func (m Model) Init() tea.Cmd {
+	if m.prompt {
+		return nil
+	}
 	return tea.Batch(waitForResult(m.results), tickCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.prompt {
+			return m.updatePrompt(msg)
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "n":
+			if m.done {
+				m.toPrompt()
+				return m, nil
+			}
 		}
 
 	case tickMsg:
+		if m.prompt {
+			return m, nil // no spinner in prompt state; stop ticking
+		}
 		if !m.done {
 			m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
 			return m, tickCmd()
 		}
 
+	case scanStartedMsg:
+		m.lastDir = msg.dir
+		if len(msg.paths) == 0 {
+			m.hint = fmt.Sprintf("no files match under %s", msg.dir)
+			return m, nil
+		}
+		m.hint = ""
+		m.resetRun(msg.paths, msg.parsed, msg.results)
+		m.prompt = false
+		return m, tea.Batch(waitForResult(m.results), tickCmd())
+
+	case scanErrorMsg:
+		m.hint = "error: " + msg.err.Error()
+		return m, nil
 	case resultMsg:
 		if idx, ok := m.byPath[msg.Path]; ok {
 			m.rows[idx].res = validator.Result(msg)
@@ -365,6 +450,15 @@ func (m Model) summary() string {
 
 func (m Model) View() string {
 	var b strings.Builder
+	if m.prompt {
+		b.WriteString("\n" + renderHeader(m.endpoint, m.mode, m.nProxies, m.workers))
+		b.WriteString("\n  folder with cookie .txt files:\n\n    " + m.input + "▌\n\n")
+		b.WriteString("  enter scan · esc quit\n")
+		if m.hint != "" {
+			b.WriteString("\n  " + styleWarning.Render(m.hint) + "\n")
+		}
+		return b.String()
+	}
 	frame := spinnerFrames[m.spinnerIdx]
 	b.WriteString("\n" + renderHeader(m.endpoint, m.mode, m.nProxies, m.workers))
 
@@ -503,4 +597,62 @@ func Run(paths []string, parsed []*cookie.CookieFile, endpoint, mode string, nPr
 		}
 	}
 	return nil
+}
+
+// RunInteractive executes the Bubble Tea program in prompt-first mode: the
+// user types a folder path, enter scans it, n returns to the prompt.
+func RunInteractive(m Model) error {
+	_, err := tea.NewProgram(m).Run()
+	return err
+}
+
+// scanCmd runs one scan; discovery and parsing are local and fast, the worker
+// pump keeps running in background goroutines.
+func scanCmd(scan ScanFunc, dir string) tea.Cmd {
+	return func() tea.Msg {
+		paths, parsed, results, err := scan(dir, "*.txt")
+		if err != nil {
+			return scanErrorMsg{err}
+		}
+		return scanStartedMsg{dir: dir, paths: paths, parsed: parsed, results: results}
+	}
+}
+
+// expandHome turns a leading ~ into the user's home directory.
+func expandHome(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
+}
+
+// updatePrompt handles the minimal folder-path input: runes, backspace, clear,
+// space, enter to scan, esc/ctrl+c to quit.
+func (m Model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		dir := expandHome(strings.TrimSpace(m.input))
+		if dir == "" {
+			m.hint = "type a folder path first"
+			return m, nil
+		}
+		m.hint = ""
+		return m, scanCmd(m.scan, dir)
+	case tea.KeyBackspace:
+		r := []rune(m.input)
+		if len(r) > 0 {
+			m.input = string(r[:len(r)-1])
+		}
+	case tea.KeyCtrlU:
+		m.input = ""
+	case tea.KeySpace:
+		m.input += " "
+	case tea.KeyEsc, tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyRunes:
+		m.input += string(msg.Runes)
+	}
+	return m, nil
 }

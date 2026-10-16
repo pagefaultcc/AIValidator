@@ -24,8 +24,10 @@ go run ./cmd/claude-validator  # validate files in cookies/ (default -dir) again
 ```
 
 Useful flags: `-dir` (file or folder; default `cookies/`), `-pattern` (default
-`*` for all files in folder), `-valid-dir` (default `valid/`, folder for valid
-cookies), `-invalid-dir` (default `invalid/`, folder for invalid cookies),
+`*` for all files in folder), `-tui` (interactive: pick the folder inside the
+TUI; always scans `*.txt` recursively, ignores `-pattern`, and needs a real
+TTY on stdin and stdout — refused when piped), `-valid-dir` (default `valid/`,
+folder for valid cookies),
 `-workers` (default 5), `-timeout` (default 30s, per request), `-proxies`
 (default `proxies.txt`, used only if the file exists), `-proxy-mode`
 (`sticky|rotating`), `-endpoint` (default `https://claude.ai`; exists so tests
@@ -95,8 +97,11 @@ classification.
   skipped; it is finalized in the TUI before workers start and is not sent to
   the worker pool.
 
-## TUI / output model (Bubble Tea)
-
+- **Interactive mode (`-tui`)**: starts in a folder-prompt state. Type a path
+  (runes + backspace + ctrl+u, `~` expands), `enter` scans that folder
+  recursively for `*.txt` (arbitrary file names, `-pattern` ignored), and `n`
+  after a finished run returns to the prompt for the next folder; `esc` quits.
+  Requires a real TTY on stdin and stdout — refused when piped.
 - Rows are pre-created for every discovered file; work runs in background
   goroutines; results arrive as `resultMsg` via a single `waitForResult`
   channel-receive cmd that re-arms itself. Channel closes → `allDoneMsg`.
@@ -134,8 +139,10 @@ classification.
 - When you change user-visible classification, update the pinned test bodies to
   the verified live shape, not to what the code happens to do.
 - Coverage gaps that are known and accepted: `RATE_LIMITED` on the primary
-  endpoint is simulated only (live orgs endpoint never 429s); main() flag
-  wiring is exercised manually, not unit-tested.
+  endpoint is simulated only (live orgs endpoint never 429s). The scan wiring
+  (discovery, worker pump, channel close) IS unit-tested in
+  `cmd/claude-validator/main_test.go`; only final `main()` flag parsing stays
+  manual.
 
 ## Live verification recipe (manual, no secrets in output)
 
