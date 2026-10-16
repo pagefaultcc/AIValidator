@@ -15,7 +15,167 @@ import (
 	"claude-validator/pkg/proxy"
 	"claude-validator/pkg/tui"
 	"claude-validator/pkg/validator"
+
+	"github.com/charmbracelet/lipgloss"
 )
+
+func renderColoredHelp() string {
+	var b strings.Builder
+
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51"))
+	badgeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("82"))
+	subStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220"))
+	flagStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	aliasStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
+	typeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
+	docStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	defaultStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+
+	b.WriteString("\n")
+	b.WriteString(titleStyle.Render("◈ CLAUDE SESSION & COOKIE VALIDATOR ") + badgeStyle.Render("[GO EDITION]") + "\n")
+	b.WriteString(subStyle.Render("  High-speed multi-threaded session validator for Claude.ai") + "\n\n")
+
+	b.WriteString(sectionStyle.Render("USAGE:") + "\n")
+	b.WriteString("  " + flagStyle.Render("claude.exe") + " " + typeStyle.Render("[options...]") + "\n\n")
+
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", 80)) + "\n")
+	b.WriteString(sectionStyle.Render("FLAGS & OPTIONS:") + "\n\n")
+
+	type opt struct {
+		flags string
+		val   string
+		desc  string
+		def   string
+	}
+
+	sections := []struct {
+		name string
+		opts []opt
+	}{
+		{
+			name: "TARGET DIRECTORY / FILES",
+			opts: []opt{
+				{
+					flags: "-d, -dir, -f, -folder",
+					val:   "<path>",
+					desc:  "Cookie file or folder to scan recursively",
+					def:   "cookies/",
+				},
+				{
+					flags: "-pattern",
+					val:   "<glob>",
+					desc:  "Base-name glob when target is a folder",
+					def:   "*",
+				},
+				{
+					flags: "-tui",
+					val:   "",
+					desc:  "Interactive mode: pick cookie folder inside the TUI",
+					def:   "false",
+				},
+			},
+		},
+		{
+			name: "CONCURRENCY & TIMINGS",
+			opts: []opt{
+				{
+					flags: "-w, -workers",
+					val:   "<int>",
+					desc:  "Concurrent checks (min 1)",
+					def:   "5",
+				},
+				{
+					flags: "-t, -timeout",
+					val:   "<duration>",
+					desc:  "Per-request network timeout",
+					def:   "30s",
+				},
+				{
+					flags: "-e, -endpoint",
+					val:   "<url>",
+					desc:  "Claude API base URL",
+					def:   "https://claude.ai",
+				},
+			},
+		},
+		{
+			name: "PROXY CONFIGURATION",
+			opts: []opt{
+				{
+					flags: "-p, -proxy, -proxies",
+					val:   "<file>",
+					desc:  "Proxy list file (used only if it exists)",
+					def:   "proxies.txt",
+				},
+				{
+					flags: "-m, -mode, -proxy-mode",
+					val:   "<mode>",
+					desc:  "sticky (pin file to 1 proxy) or rotating (round-robin)",
+					def:   "sticky",
+				},
+			},
+		},
+		{
+			name: "OUTPUT DIRECTORIES",
+			opts: []opt{
+				{
+					flags: "-v, -valid, -valid-dir",
+					val:   "<folder>",
+					desc:  "Folder to move valid cookie files to (empty disables)",
+					def:   "valid",
+				},
+				{
+					flags: "-i, -invalid, -invalid-dir",
+					val:   "<folder>",
+					desc:  "Folder to move invalid cookie files to (empty disables)",
+					def:   "invalid",
+				},
+			},
+		},
+		{
+			name: "HELP & INFO",
+			opts: []opt{
+				{
+					flags: "-h, --help",
+					val:   "",
+					desc:  "Show this high-visibility colored help screen and exit",
+					def:   "",
+				},
+			},
+		},
+	}
+
+	for _, sec := range sections {
+		b.WriteString(aliasStyle.Render("• "+sec.name) + "\n")
+		for _, o := range sec.opts {
+			flagPart := "  " + flagStyle.Render(o.flags)
+			if o.val != "" {
+				flagPart += " " + typeStyle.Render(o.val)
+			}
+			visLen := lipgloss.Width(flagPart)
+			padding := 36 - visLen
+			if padding < 2 {
+				padding = 2
+			}
+			line := flagPart + strings.Repeat(" ", padding) + docStyle.Render(o.desc)
+			if o.def != "" {
+				line += " " + defaultStyle.Render("(default: "+o.def+")")
+			}
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", 80)) + "\n")
+	b.WriteString(subStyle.Render("Examples:\n"))
+	b.WriteString("  " + flagStyle.Render("claude.exe -d cookies/ -w 8") + "\n")
+	b.WriteString("  " + flagStyle.Render("claude.exe -tui") + "\n")
+	b.WriteString("  " + flagStyle.Render("claude.exe -d cookies/single.txt -p proxies.txt -m rotating") + "\n\n")
+
+	return b.String()
+}
 
 // newScanner returns a tui.ScanFunc that runs one full scan (discover, parse,
 // worker pool with file sorting) for a folder. The flag-driven flow and the
@@ -111,61 +271,118 @@ func newScanner(proxies []proxy.Proxy, mode string, workers int, timeout time.Du
 }
 
 func main() {
-	dir := flag.String("dir", "cookies", "cookie file or folder to scan recursively (default: cookies/)")
+	flag.Usage = func() {
+		fmt.Print(renderColoredHelp())
+	}
+
+	var dirFlag, folderFlag, fFlag, dFlag string
+	flag.StringVar(&dirFlag, "dir", "", "cookie file or folder to scan recursively (default: cookies/)")
+	flag.StringVar(&folderFlag, "folder", "", "alias for -dir")
+	flag.StringVar(&fFlag, "f", "", "alias for -dir")
+	flag.StringVar(&dFlag, "d", "", "alias for -dir")
+
 	pattern := flag.String("pattern", "*", "base-name glob when -dir is a folder (default: * [all files])")
-	proxiesPath := flag.String("proxies", "proxies.txt", "proxy list file (used only if it exists)")
-	proxyMode := flag.String("proxy-mode", "sticky", "sticky (pin file to one static proxy) or rotating (round-robin endpoints)")
-	workers := flag.Int("workers", 5, "concurrent checks (min 1)")
-	timeout := flag.Duration("timeout", 30*time.Second, "per-request timeout")
-	endpoint := flag.String("endpoint", "https://claude.ai", "API base URL")
-	validDir := flag.String("valid-dir", "valid", "folder to move valid cookie files to (empty to disable)")
-	invalidDir := flag.String("invalid-dir", "invalid", "folder to move invalid cookie files to (empty to disable)")
+
+	var proxiesFlag, proxyFlag, pFlag string
+	flag.StringVar(&proxiesFlag, "proxies", "", "proxy list file (used only if it exists)")
+	flag.StringVar(&proxyFlag, "proxy", "", "alias for -proxies")
+	flag.StringVar(&pFlag, "p", "", "alias for -proxies")
+
+	var proxyModeFlag, modeFlag, mFlag string
+	flag.StringVar(&proxyModeFlag, "proxy-mode", "", "sticky or rotating")
+	flag.StringVar(&modeFlag, "mode", "", "alias for -proxy-mode")
+	flag.StringVar(&mFlag, "m", "", "alias for -proxy-mode")
+
+	var workersFlag, wFlag int
+	flag.IntVar(&workersFlag, "workers", 0, "concurrent checks (min 1)")
+	flag.IntVar(&wFlag, "w", 0, "alias for -workers")
+
+	var timeoutFlag, tFlag time.Duration
+	flag.DurationVar(&timeoutFlag, "timeout", 0, "per-request timeout")
+	flag.DurationVar(&tFlag, "t", 0, "alias for -timeout")
+
+	var endpointFlag, eFlag string
+	flag.StringVar(&endpointFlag, "endpoint", "", "API base URL")
+	flag.StringVar(&eFlag, "e", "", "alias for -endpoint")
+
+	var validDirFlag, validFlag, vFlag string
+	flag.StringVar(&validDirFlag, "valid-dir", "", "folder to move valid cookie files to (empty to disable)")
+	flag.StringVar(&validFlag, "valid", "", "alias for -valid-dir")
+	flag.StringVar(&vFlag, "v", "", "alias for -valid-dir")
+
+	var invalidDirFlag, invalidFlag, iFlag string
+	flag.StringVar(&invalidDirFlag, "invalid-dir", "", "folder to move invalid cookie files to (empty to disable)")
+	flag.StringVar(&invalidFlag, "invalid", "", "alias for -invalid-dir")
+	flag.StringVar(&iFlag, "i", "", "alias for -invalid-dir")
+
 	tuiMode := flag.Bool("tui", false, "interactive mode: pick the cookie folder inside the TUI")
 	flag.Parse()
 
-	if *proxyMode != "sticky" && *proxyMode != "rotating" {
-		fatal(fmt.Errorf("invalid -proxy-mode %q (want sticky or rotating)", *proxyMode))
+	targetDir := firstNonEmpty(dirFlag, folderFlag, fFlag, dFlag, "cookies")
+	proxiesPath := firstNonEmpty(proxiesFlag, proxyFlag, pFlag, "proxies.txt")
+	proxyMode := firstNonEmpty(proxyModeFlag, modeFlag, mFlag, "sticky")
+
+	workers := workersFlag
+	if workers <= 0 {
+		workers = wFlag
 	}
-	if *workers < 1 {
-		*workers = 1
+	if workers <= 0 {
+		workers = 5
+	}
+
+	timeout := timeoutFlag
+	if timeout <= 0 {
+		timeout = tFlag
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
+	endpoint := firstNonEmpty(endpointFlag, eFlag, "https://claude.ai")
+	validDir := firstNonEmpty(validDirFlag, validFlag, vFlag, "valid")
+	invalidDir := firstNonEmpty(invalidDirFlag, invalidFlag, iFlag, "invalid")
+
+	if proxyMode != "sticky" && proxyMode != "rotating" {
+		fatal(fmt.Errorf("invalid -proxy-mode %q (want sticky or rotating)", proxyMode))
 	}
 
 	// Proxies are optional: a missing proxies.txt is not an error.
 	var proxies []proxy.Proxy
-	if _, err := os.Stat(*proxiesPath); err == nil {
-		proxies, err = proxy.LoadProxies(*proxiesPath)
+	if _, err := os.Stat(proxiesPath); err == nil {
+		proxies, err = proxy.LoadProxies(proxiesPath)
 		if err != nil {
 			fatal(err)
 		}
 	}
 
-	endpointNorm := strings.TrimRight(*endpoint, "/")
-	scan := newScanner(proxies, *proxyMode, *workers, *timeout, endpointNorm, *validDir, *invalidDir)
+	endpointNorm := strings.TrimRight(endpoint, "/")
+	scan := newScanner(proxies, proxyMode, workers, timeout, endpointNorm, validDir, invalidDir)
 
 	if *tuiMode {
 		if !isCharDevice(os.Stdout) || !isCharDevice(os.Stdin) {
 			fatal(fmt.Errorf("-tui requires an interactive terminal (stdin and stdout on a TTY)"))
 		}
-		if err := tui.RunInteractive(tui.NewInteractiveModel(scan, endpointNorm, *proxyMode, len(proxies), *workers)); err != nil {
+		if err := tui.RunInteractive(tui.NewInteractiveModel(scan, endpointNorm, proxyMode, len(proxies), workers)); err != nil {
 			fatal(err)
 		}
 		return
 	}
 
-	paths, parsed, results, err := scan(*dir, *pattern)
+	paths, parsed, results, err := scan(targetDir, *pattern)
 	if err != nil {
-		if os.IsNotExist(err) && *dir == "cookies" {
-			_ = os.MkdirAll(*dir, 0o755)
-			fmt.Fprintf(os.Stderr, "created %s/ folder; drop your cookie files here\n", *dir)
+		if os.IsNotExist(err) && targetDir == "cookies" {
+			_ = os.MkdirAll(targetDir, 0o755)
+			fmt.Fprintf(os.Stderr, "created %s/ folder; drop your cookie files here\n", targetDir)
 			os.Exit(0)
 		}
 		fatal(err)
 	}
 	if len(paths) == 0 {
-		fmt.Fprintf(os.Stderr, "no cookie files found in %s matching %s\n", *dir, *pattern)
+		fmt.Fprintf(os.Stderr, "no cookie files found in %s matching %s\n", targetDir, *pattern)
 		os.Exit(0)
 	}
-	if err := tui.Run(paths, parsed, endpointNorm, *proxyMode, len(proxies), *workers, results); err != nil {
+
+	if err := tui.Run(paths, parsed, endpointNorm, proxyMode, len(proxies), workers, results); err != nil {
 		fatal(err)
 	}
 }
@@ -178,7 +395,16 @@ func isCharDevice(f *os.File) bool {
 	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "error:", err)
+	fmt.Fprintf(os.Stderr, "error: %v\n", err)
 	os.Exit(1)
 }

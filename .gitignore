@@ -20,6 +20,8 @@ message.txt
 *.exe
 /dist/
 **/dist/
+/out/
+**/out/
 
 # macOS
 .DS_Store

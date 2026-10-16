@@ -92,7 +92,12 @@ func browserHeaders(endpoint string) map[string]string {
 func CheckCookieFile(ctx context.Context, file *cookie.CookieFile, pickProxy func() *proxy.Proxy, timeout time.Duration, endpoint string) (res Result) {
 	start := time.Now()
 	res.Path = file.Path
-	defer func() { res.Elapsed = time.Since(start) }()
+	defer func() {
+		res.Elapsed = time.Since(start)
+		if res.Elapsed <= 0 {
+			res.Elapsed = time.Microsecond
+		}
+	}()
 
 	if file.Err != nil {
 		res.Status = StatusParseError
