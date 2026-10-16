@@ -11,6 +11,8 @@ message.txt
 **/message.txt
 *.cookies
 **/*.cookies
+valid_sessions.txt
+**/valid_sessions.txt
 
 # Build artifacts
 /claude/claude-validator

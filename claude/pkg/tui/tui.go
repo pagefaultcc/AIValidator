@@ -300,23 +300,34 @@ func formatStatus(s validator.Status, spinner string) string {
 	}
 }
 
+func truncateMiddle(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 5 {
+		return s[:maxLen]
+	}
+	head := (maxLen - 3) / 2
+	tail := maxLen - 3 - head
+	return s[:head] + "..." + s[len(s)-tail:]
+}
+
+func padRight(s string, width int) string {
+	visLen := lipgloss.Width(s)
+	if visLen == width {
+		return s
+	}
+	if visLen > width {
+		return s[:width]
+	}
+	return s + strings.Repeat(" ", width-visLen)
+}
+
 func formatPath(p string, width int) string {
 	clean := filepath.Clean(p)
-	dir := filepath.Dir(clean)
-	base := filepath.Base(clean)
-
-	var formatted string
-	if dir == "." || dir == "" {
-		formatted = styleFileBase.Render(base)
-	} else {
-		formatted = styleMutedPath.Render(dir+string(filepath.Separator)) + styleFileBase.Render(base)
-	}
-
-	visLen := len(clean)
-	if visLen < width {
-		return formatted + strings.Repeat(" ", width-visLen)
-	}
-	return formatted
+	truncated := truncateMiddle(clean, width)
+	padded := padRight(truncated, width)
+	return styleFileBase.Render(padded)
 }
 
 func formatDetail(res validator.Result) string {
@@ -441,7 +452,24 @@ func (m Model) summary() string {
 	total := len(m.rows)
 	done := m.valid + m.invalid + m.expired + m.rateLim + m.blocked + m.errCount
 
+	var barStr string
+	if total > 0 {
+		pct := float64(done) / float64(total)
+		filled := int(pct * 20)
+		if filled > 20 {
+			filled = 20
+		}
+		empty := 20 - filled
+		barStr = fmt.Sprintf(" [%s%s] %s",
+			lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render(strings.Repeat("█", filled)),
+			lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("░", empty)),
+			lipgloss.NewStyle().Bold(true).Foreground(colCyan).Render(fmt.Sprintf("%.1f%%", pct*100)))
+	}
+
 	badge := lipgloss.NewStyle().Bold(true).Foreground(colWhite).Render(fmt.Sprintf("[%d/%d]", done, total))
+	if barStr != "" {
+		badge += barStr
+	}
 	if len(parts) == 0 {
 		return badge + "  checking..."
 	}

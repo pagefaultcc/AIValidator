@@ -300,6 +300,12 @@ func Run() {
 		fatal(err)
 	}
 
+	// Pre-count total files fast (< 0.1s on 100K files) without reading content
+	totalFiles := cookie.FastCountCookieFiles(targetDir, *pattern)
+	if totalFiles == 0 {
+		fmt.Fprintf(os.Stderr, "no cookie files found in %s matching %s\n", targetDir, *pattern)
+		os.Exit(0)
+	}
 	// Load & verify proxies
 	var proxies []proxy.Proxy
 	if proxyInput != "" {
@@ -387,7 +393,7 @@ func Run() {
 		close(resultsChan)
 	}()
 
-	if err := tui.Run(endpointNorm, proxyMode, len(proxies), workers, &totalDiscovered, &discoveryDone, resultsChan); err != nil {
+	if err := tui.Run(endpointNorm, proxyMode, len(proxies), workers, totalFiles, resultsChan); err != nil {
 		fatal(err)
 	}
 }
