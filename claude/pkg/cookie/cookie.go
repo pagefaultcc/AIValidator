@@ -1,12 +1,14 @@
 package cookie
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -93,6 +95,68 @@ func DiscoverCookieFiles(dir, pattern string) ([]string, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// StreamCookieFiles streams discovered cookie file paths to out channel without
+// buffering all files in memory, scaling to 100K+ files.
+func StreamCookieFiles(ctx context.Context, dir, pattern string, out chan<- string, totalDiscovered *atomic.Int64, discoveryDone *atomic.Bool) error {
+	defer func() {
+		if discoveryDone != nil {
+			discoveryDone.Store(true)
+		}
+		close(out)
+	}()
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		out <- dir
+		if totalDiscovered != nil {
+			totalDiscovered.Add(1)
+		}
+		return nil
+	}
+
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		name := d.Name()
+		if d.IsDir() {
+			if name == "valid" || name == "invalid" {
+				return filepath.SkipDir
+			}
+			if strings.HasPrefix(name, ".") && !strings.HasPrefix(pattern, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(pattern, ".") {
+			return nil
+		}
+		if pattern == "" || pattern == "*" {
+			out <- path
+			if totalDiscovered != nil {
+				totalDiscovered.Add(1)
+			}
+			return nil
+		}
+		if ok, _ := filepath.Match(pattern, name); ok {
+			out <- path
+			if totalDiscovered != nil {
+				totalDiscovered.Add(1)
+			}
+		}
+		return nil
+	})
 }
 
 // BuildCookieHeader joins the parsed cookies the way a browser would send them.

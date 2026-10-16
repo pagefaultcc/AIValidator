@@ -5,12 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"chatgpt-validator/pkg/cookie"
 	"chatgpt-validator/pkg/validator"
 )
 
@@ -22,8 +22,7 @@ type (
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-const maxShownRows = 40
-const recentRows = 15
+const recentWindowSize = 15
 
 // Palette & Lipgloss Styles
 var (
@@ -66,55 +65,46 @@ var (
 	styleDivider     = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 )
 
-type row struct {
-	path string
-	cf   *cookie.CookieFile
-	res  validator.Result
-}
-
-// Model represents the Bubble Tea state.
+// Model represents the streaming Bubble Tea state. Memory consumption is constant
+// regardless of whether scanning 10 or 1,000,000 files.
 type Model struct {
-	paths    []string
-	rows     []row
-	byPath   map[string]int
-	recent   []int
-	endpoint string
-	mode     string
-	nProxies int
-	workers  int
-	results  <-chan validator.Result
+	endpoint        string
+	mode            string
+	nProxies        int
+	workers         int
+	totalDiscovered *atomic.Int64
+	discoveryDone   *atomic.Bool
+	results         <-chan validator.Result
 
-	spinnerIdx int
-	done       bool
-	valid      int
-	invalid    int
-	expired    int
-	rateLim    int
-	blocked    int
-	retries    int
-	empty      int
-	errCount   int
-	headless   bool
+	recent         []validator.Result // sliding window of recent items
+	valids         []validator.Result // valid accounts collected for bottom display
+	spinnerIdx     int
+	done           bool
+	totalProcessed int
+	valid          int
+	invalid        int
+	expired        int
+	rateLim        int
+	blocked        int
+	retries        int
+	empty          int
+	errCount       int
+	headless       bool
 }
 
-// NewModel initializes the TUI model.
-func NewModel(paths []string, parsed []*cookie.CookieFile, endpoint, mode string, nProxies, workers int, results <-chan validator.Result) Model {
-	rows := make([]row, len(paths))
-	byPath := make(map[string]int, len(paths))
-	for i, p := range paths {
-		rows[i] = row{path: p, cf: parsed[i]}
-		byPath[p] = i
-	}
+// NewModel initializes the streaming TUI model.
+func NewModel(endpoint, mode string, nProxies, workers int, totalDiscovered *atomic.Int64, discoveryDone *atomic.Bool, results <-chan validator.Result) Model {
 	return Model{
-		paths:    paths,
-		rows:     rows,
-		byPath:   byPath,
-		endpoint: endpoint,
-		mode:     mode,
-		nProxies: nProxies,
-		workers:  workers,
-		results:  results,
-		headless: !isCharDevice(os.Stdout),
+		endpoint:        endpoint,
+		mode:            mode,
+		nProxies:        nProxies,
+		workers:         workers,
+		totalDiscovered: totalDiscovered,
+		discoveryDone:   discoveryDone,
+		results:         results,
+		recent:          make([]validator.Result, 0, recentWindowSize),
+		valids:          make([]validator.Result, 0, 64),
+		headless:        !isCharDevice(os.Stdout),
 	}
 }
 
@@ -159,31 +149,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case resultMsg:
-		if idx, ok := m.byPath[msg.Path]; ok {
-			m.rows[idx].res = validator.Result(msg)
-			switch msg.Status {
-			case validator.StatusValid:
-				m.valid++
-			case validator.StatusInvalid:
-				m.invalid++
-			case validator.StatusExpired:
-				m.expired++
-			case validator.StatusRateLimited:
-				m.rateLim++
-			case validator.StatusBlocked:
-				m.blocked++
-			case validator.StatusRetry:
-				m.retries++
-			case validator.StatusEmpty:
-				m.empty++
-			default:
-				m.errCount++
-			}
-			m.recent = append(m.recent, idx)
-			if len(m.recent) > recentRows {
-				m.recent = m.recent[len(m.recent)-recentRows:]
-			}
+		m.totalProcessed++
+		res := validator.Result(msg)
+
+		switch res.Status {
+		case validator.StatusValid:
+			m.valid++
+			m.valids = append(m.valids, res)
+		case validator.StatusInvalid:
+			m.invalid++
+		case validator.StatusExpired:
+			m.expired++
+		case validator.StatusRateLimited:
+			m.rateLim++
+		case validator.StatusBlocked:
+			m.blocked++
+		case validator.StatusRetry:
+			m.retries++
+		case validator.StatusEmpty:
+			m.empty++
+		default:
+			m.errCount++
 		}
+
+		// Update sliding window
+		m.recent = append(m.recent, res)
+		if len(m.recent) > recentWindowSize {
+			m.recent = m.recent[len(m.recent)-recentWindowSize:]
+		}
+
+		if m.headless {
+			// In headless mode, output each result line in real-time
+			fmt.Println(formatResultLine(res))
+		}
+
 		return m, waitForResult(m.results)
 
 	case allDoneMsg:
@@ -314,12 +313,12 @@ func formatElapsed(d time.Duration) string {
 	return styleElapsed.Render("(" + d.Round(time.Millisecond).String() + ")")
 }
 
-func (r row) line(frame string) string {
-	statusStr := formatStatus(r.res.Status, frame)
-	pathStr := formatPath(r.path, 32)
-	detailStr := formatDetail(r.res)
-	proxyStr := formatProxy(r.res.Proxy)
-	elapsedStr := formatElapsed(r.res.Elapsed)
+func formatResultLine(res validator.Result) string {
+	statusStr := formatStatus(res.Status, "•")
+	pathStr := formatPath(res.Path, 32)
+	detailStr := formatDetail(res)
+	proxyStr := formatProxy(res.Proxy)
+	elapsedStr := formatElapsed(res.Elapsed)
 
 	line := fmt.Sprintf(" %s  %s  %s", statusStr, pathStr, detailStr)
 	if proxyStr != "" {
@@ -374,10 +373,25 @@ func (m Model) summary() string {
 	if m.errCount > 0 {
 		parts = append(parts, lipgloss.NewStyle().Foreground(colRed).Render(fmt.Sprintf("⚠ %d error", m.errCount)))
 	}
-	total := len(m.rows)
-	done := m.valid + m.invalid + m.expired + m.rateLim + m.blocked + m.retries + m.empty + m.errCount
 
-	badge := lipgloss.NewStyle().Bold(true).Foreground(colWhite).Render(fmt.Sprintf("[%d/%d]", done, total))
+	var badge string
+	var totalDisc int64
+	var isDone bool
+	if m.totalDiscovered != nil {
+		totalDisc = m.totalDiscovered.Load()
+	}
+	if m.discoveryDone != nil {
+		isDone = m.discoveryDone.Load()
+	}
+
+	if isDone && totalDisc > 0 {
+		badge = lipgloss.NewStyle().Bold(true).Foreground(colWhite).Render(fmt.Sprintf("[%d/%d]", m.totalProcessed, totalDisc))
+	} else if totalDisc > 0 {
+		badge = lipgloss.NewStyle().Bold(true).Foreground(colWhite).Render(fmt.Sprintf("[%d/%d...]", m.totalProcessed, totalDisc))
+	} else {
+		badge = lipgloss.NewStyle().Bold(true).Foreground(colWhite).Render(fmt.Sprintf("[%d checked]", m.totalProcessed))
+	}
+
 	if len(parts) == 0 {
 		return badge + "  checking..."
 	}
@@ -386,80 +400,71 @@ func (m Model) summary() string {
 
 func (m Model) View() string {
 	var b strings.Builder
-	frame := spinnerFrames[m.spinnerIdx]
 	b.WriteString("\n" + renderHeader(m.endpoint, m.mode, m.nProxies, m.workers))
 
-	if len(m.rows) <= maxShownRows {
-		for _, r := range m.rows {
-			b.WriteString(r.line(frame))
-			b.WriteString("\n")
-		}
-	} else {
-		for _, idx := range m.recent {
-			b.WriteString(m.rows[idx].line(frame))
-			b.WriteString("\n")
-		}
+	// Render rolling stream of recent files
+	for _, res := range m.recent {
+		b.WriteString(formatResultLine(res) + "\n")
 	}
 
 	b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
 	b.WriteString(" " + m.summary() + "\n")
+
 	if m.done {
-		b.WriteString("\n" + m.ValidSummary())
 		b.WriteString(" " + lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render("✔ Done.") + " Press q to exit.\n")
 	} else {
-		b.WriteString("\n " + styleHeaderMeta.Render("Press q to quit.") + "\n")
+		b.WriteString(" " + styleHeaderMeta.Render("Press q to quit.") + "\n")
 	}
+
+	// Valids printed cleanly at the very bottom, NOT between bars
+	if len(m.valids) > 0 {
+		b.WriteString(renderValidSummary(m.valids))
+	} else if m.done {
+		b.WriteString("\n " + lipgloss.NewStyle().Foreground(colMuted).Render("No valid sessions found.") + "\n")
+	}
+
 	return b.String()
 }
 
-// ValidSummary returns a formatted recap of all valid sessions.
+// ValidSummary returns a formatted recap of all valid sessions at bottom.
 func (m Model) ValidSummary() string {
-	var valids []row
-	for _, r := range m.rows {
-		if r.res.Status == validator.StatusValid {
-			valids = append(valids, r)
-		}
-	}
-	return renderValidSummary(valids)
+	return renderValidSummary(m.valids)
 }
 
-func renderValidSummary(rows []row) string {
+func renderValidSummary(valids []validator.Result) string {
 	var b strings.Builder
-	if len(rows) == 0 {
-		b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
-		b.WriteString(" " + lipgloss.NewStyle().Foreground(colMuted).Render("No valid sessions found.") + "\n")
-		b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
+	if len(valids) == 0 {
+		b.WriteString("\n " + lipgloss.NewStyle().Foreground(colMuted).Render("No valid sessions found.") + "\n")
 		return b.String()
 	}
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(colGreen).Render(fmt.Sprintf("✔ VALID SESSIONS (%d):", len(rows)))
-	b.WriteString(title + "\n")
-	b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
+	title := lipgloss.NewStyle().Bold(true).Foreground(colGreen).Render(fmt.Sprintf("✔ VALID SESSIONS (%d):", len(valids)))
+	b.WriteString("\n" + title + "\n")
 
-	for _, r := range rows {
+	for _, r := range valids {
 		planBadge := stylePlanDefault.Render("[Free]")
-		if r.res.Plan != "" {
-			if strings.EqualFold(r.res.Plan, "Free") {
+		if r.Plan != "" {
+			if strings.EqualFold(r.Plan, "Free") {
 				planBadge = stylePlanDefault.Render("[Free]")
 			} else {
-				planBadge = stylePlanPro.Render("[" + r.res.Plan + "]")
+				planBadge = stylePlanPro.Render("[" + r.Plan + "]")
 			}
 		}
 
-		displayPath := r.res.MovedPath
+		displayPath := r.MovedPath
 		if displayPath == "" {
-			displayPath = r.path
+			displayPath = r.Path
 		}
 		pathStr := formatPath(displayPath, 32)
 		var meta []string
-		if r.res.Email != "" {
-			meta = append(meta, styleEmail.Render(r.res.Email))
+		if r.Email != "" {
+			meta = append(meta, styleEmail.Render(r.Email))
 		}
-		if r.res.Expiry != "" && r.res.Expiry != "Unknown" {
-			meta = append(meta, styleExpiry.Render("exp: "+r.res.Expiry))
+		if r.Expiry != "" && r.Expiry != "Unknown" {
+			meta = append(meta, styleExpiry.Render("exp: "+r.Expiry))
 		}
-		if r.res.Proxy != "" {
-			meta = append(meta, styleProxy.Render("["+r.res.Proxy+"]"))
+		if r.Proxy != "" {
+			meta = append(meta, styleProxy.Render("["+r.Proxy+"]"))
 		}
 
 		metaStr := strings.Join(meta, "  ")
@@ -469,39 +474,12 @@ func renderValidSummary(rows []row) string {
 			b.WriteString(fmt.Sprintf("  ✔ %s  %s\n", pathStr, planBadge))
 		}
 	}
-	b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
-	return b.String()
-}
-
-// PlainOutput outputs complete non-interactive lines for pipes and redirects.
-func (m Model) PlainOutput() string {
-	var b strings.Builder
-	b.WriteString("\n" + renderHeader(m.endpoint, m.mode, m.nProxies, m.workers))
-	for _, r := range m.rows {
-		statusStr := formatStatus(r.res.Status, "•")
-		pathStr := formatPath(r.path, 32)
-		detailStr := formatDetail(r.res)
-		proxyStr := formatProxy(r.res.Proxy)
-		elapsedStr := formatElapsed(r.res.Elapsed)
-
-		line := fmt.Sprintf(" %s  %s  %s", statusStr, pathStr, detailStr)
-		if proxyStr != "" {
-			line += "  " + proxyStr
-		}
-		if elapsedStr != "" {
-			line += "  " + elapsedStr
-		}
-		b.WriteString(line + "\n")
-	}
-	b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
-	b.WriteString(" " + m.summary() + "\n\n")
-	b.WriteString(m.ValidSummary() + "\n")
 	return b.String()
 }
 
 // Run launches the Bubble Tea program for the validation session.
-func Run(paths []string, parsed []*cookie.CookieFile, endpoint, mode string, nProxies, workers int, results <-chan validator.Result) error {
-	m := NewModel(paths, parsed, endpoint, mode, nProxies, workers, results)
+func Run(endpoint, mode string, nProxies, workers int, totalDiscovered *atomic.Int64, discoveryDone *atomic.Bool, results <-chan validator.Result) error {
+	m := NewModel(endpoint, mode, nProxies, workers, totalDiscovered, discoveryDone, results)
 	var p *tea.Program
 	if m.headless {
 		p = tea.NewProgram(m, tea.WithInput(nil), tea.WithoutRenderer())
@@ -513,10 +491,12 @@ func Run(paths []string, parsed []*cookie.CookieFile, endpoint, mode string, nPr
 		return err
 	}
 	if fm, ok := final.(Model); ok {
-		if m.headless {
-			fmt.Print(fm.PlainOutput())
+		if !m.headless {
+			// Print valids recap at the bottom of the terminal output
+			fmt.Print(fm.ValidSummary() + "\n")
 		} else {
-			fmt.Print("\n" + fm.ValidSummary() + "\n")
+			fmt.Println("\n" + fm.summary())
+			fmt.Print(fm.ValidSummary() + "\n")
 		}
 	}
 	return nil

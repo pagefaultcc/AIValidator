@@ -1,12 +1,16 @@
 package cookie
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 )
 
 // CookieFile represents a parsed cookie file (Netscape or JSON format).
@@ -18,8 +22,16 @@ type CookieFile struct {
 
 // ParseCookieFile reads a cookie file, supporting both Netscape format (tab or
 // whitespace separated, preserving #HttpOnly_ lines) and JSON exports.
+// Optimized with a 512KB limit reader to avoid runaway allocations on corrupt files.
 func ParseCookieFile(path string) (*CookieFile, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	// Read up to 512KB (normal cookie files are < 50KB)
+	data, err := io.ReadAll(io.LimitReader(f, 512*1024))
 	if err != nil {
 		return nil, err
 	}
@@ -29,42 +41,43 @@ func ParseCookieFile(path string) (*CookieFile, error) {
 		Cookies: make(map[string]string),
 	}
 
-	content := string(data)
-	trimmed := strings.TrimSpace(content)
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return cf, nil
+	}
 
 	// 1. JSON export fallback (array of cookie objects or key-value map)
-	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+	if trimmed[0] == '[' || trimmed[0] == '{' {
 		if parseJSONCookies(trimmed, cf.Cookies) {
 			return cf, nil
 		}
 	}
 
 	// 2. Netscape format line parser
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		line = strings.TrimRight(line, "\r")
-		line = strings.TrimSpace(line)
-		if line == "" {
+	lines := bytes.Split(data, []byte("\n"))
+	for _, rawLine := range lines {
+		rawLine = bytes.TrimRight(rawLine, "\r")
+		rawLine = bytes.TrimSpace(rawLine)
+		if len(rawLine) == 0 {
 			continue
 		}
 
-		if strings.HasPrefix(line, "#HttpOnly_") {
-			line = strings.TrimPrefix(line, "#HttpOnly_")
-		} else if strings.HasPrefix(line, "#") {
+		if bytes.HasPrefix(rawLine, []byte("#HttpOnly_")) {
+			rawLine = bytes.TrimPrefix(rawLine, []byte("#HttpOnly_"))
+		} else if rawLine[0] == '#' {
 			continue
 		}
 
-		parts := strings.Split(line, "\t")
+		parts := bytes.Split(rawLine, []byte("\t"))
 		if len(parts) != 7 {
-			parts = strings.Fields(line)
+			parts = bytes.Fields(rawLine)
 			if len(parts) != 7 {
 				continue
 			}
 		}
 
-		// Netscape format columns: domain, flag, path, secure, expiry, name, value
-		name := parts[5]
-		val := parts[6]
+		name := string(parts[5])
+		val := string(parts[6])
 		if name != "" {
 			cf.Cookies[name] = val
 		}
@@ -73,10 +86,10 @@ func ParseCookieFile(path string) (*CookieFile, error) {
 	return cf, nil
 }
 
-func parseJSONCookies(content string, target map[string]string) bool {
+func parseJSONCookies(data []byte, target map[string]string) bool {
 	// Try parsing as array of cookie objects: [{"name": "foo", "value": "bar"}, ...]
 	var list []map[string]any
-	if err := json.Unmarshal([]byte(content), &list); err == nil && len(list) > 0 {
+	if err := json.Unmarshal(data, &list); err == nil && len(list) > 0 {
 		for _, item := range list {
 			var name, val string
 			if n, ok := item["name"].(string); ok && n != "" {
@@ -102,7 +115,7 @@ func parseJSONCookies(content string, target map[string]string) bool {
 
 	// Try parsing as key-value map: {"cookie_name": "cookie_value", ...}
 	var dict map[string]any
-	if err := json.Unmarshal([]byte(content), &dict); err == nil && len(dict) > 0 {
+	if err := json.Unmarshal(data, &dict); err == nil && len(dict) > 0 {
 		for k, v := range dict {
 			if v != nil {
 				target[k] = fmt.Sprintf("%v", v)
@@ -116,9 +129,7 @@ func parseJSONCookies(content string, target map[string]string) bool {
 	return false
 }
 
-// DiscoverCookieFiles discovers candidate cookie files. If target is a single
-// file, it returns it directly. If target is a directory, it scans recursively,
-// ignoring .git, valid, invalid, and hidden files.
+// DiscoverCookieFiles discovers candidate cookie files (used for testing and small scans).
 func DiscoverCookieFiles(dir, pattern string) ([]string, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
@@ -179,7 +190,6 @@ func DiscoverCookieFiles(dir, pattern string) ([]string, error) {
 			return nil
 		}
 
-		// When pattern is "*" or default, only include valid cookie extensions
 		if allowedExts[ext] {
 			out = append(out, path)
 		}
@@ -190,6 +200,98 @@ func DiscoverCookieFiles(dir, pattern string) ([]string, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// StreamCookieFiles walks dir and streams matching cookie file paths one by one
+// into out channel. It begins streaming immediately without buffering all files
+// into memory, making it scale to 100K+ files with minimal RAM.
+func StreamCookieFiles(ctx context.Context, dir, pattern string, out chan<- string, totalDiscovered *atomic.Int64, discoveryDone *atomic.Bool) error {
+	defer func() {
+		if discoveryDone != nil {
+			discoveryDone.Store(true)
+		}
+		close(out)
+	}()
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		out <- dir
+		if totalDiscovered != nil {
+			totalDiscovered.Add(1)
+		}
+		return nil
+	}
+
+	allowedExts := map[string]bool{
+		".txt":     true,
+		".cookie":  true,
+		".cookies": true,
+		".json":    true,
+		"":         true,
+	}
+
+	ignoredExts := map[string]bool{
+		".py":  true,
+		".go":  true,
+		".exe": true,
+		".dll": true,
+		".so":  true,
+		".mod": true,
+		".sum": true,
+		".md":  true,
+	}
+
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		name := d.Name()
+		if d.IsDir() {
+			if strings.EqualFold(name, "valid") || strings.EqualFold(name, "invalid") {
+				return filepath.SkipDir
+			}
+			if strings.HasPrefix(name, ".") && !strings.HasPrefix(pattern, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(pattern, ".") {
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(name))
+		if ignoredExts[ext] {
+			return nil
+		}
+
+		if pattern != "" && pattern != "*" {
+			if ok, _ := filepath.Match(pattern, name); ok {
+				out <- path
+				if totalDiscovered != nil {
+					totalDiscovered.Add(1)
+				}
+			}
+			return nil
+		}
+
+		if allowedExts[ext] {
+			out <- path
+			if totalDiscovered != nil {
+				totalDiscovered.Add(1)
+			}
+		}
+		return nil
+	})
 }
 
 // BuildCookieHeader formats cookies map into a standard HTTP Cookie header string.

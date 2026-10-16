@@ -479,8 +479,8 @@ func (m Model) View() string {
 	b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
 	b.WriteString(" " + m.summary() + "\n")
 	if m.done {
-		b.WriteString("\n" + m.ValidSummary())
 		b.WriteString(" " + lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render("✔ Done.") + " Press q to exit.\n")
+		b.WriteString(m.ValidSummary())
 	} else {
 		b.WriteString("\n " + styleHeaderMeta.Render("Press q to quit.") + "\n")
 	}
@@ -501,15 +501,12 @@ func (m Model) ValidSummary() string {
 func renderValidSummary(rows []row) string {
 	var b strings.Builder
 	if len(rows) == 0 {
-		b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
-		b.WriteString(" " + lipgloss.NewStyle().Foreground(colMuted).Render("No valid sessions found.") + "\n")
-		b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
+		b.WriteString("\n " + lipgloss.NewStyle().Foreground(colMuted).Render("No valid sessions found.") + "\n")
 		return b.String()
 	}
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(colGreen).Render(fmt.Sprintf("✔ VALID SESSIONS (%d):", len(rows)))
-	b.WriteString(title + "\n")
-	b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
+	b.WriteString("\n" + title + "\n")
 
 	for _, r := range rows {
 		planBadge := stylePlanDefault.Render("[free]")
@@ -544,7 +541,6 @@ func renderValidSummary(rows []row) string {
 			b.WriteString(fmt.Sprintf("  ✔ %s  %s\n", pathStr, planBadge))
 		}
 	}
-	b.WriteString(styleDivider.Render(strings.Repeat("─", 80)) + "\n")
 	return b.String()
 }
 

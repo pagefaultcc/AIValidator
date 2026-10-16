@@ -290,28 +290,14 @@ func Run() {
 		}
 	}
 
-	paths, err := cookie.DiscoverCookieFiles(targetDir, *pattern)
-	if err != nil {
+	// Ensure target directory or file exists
+	if _, err := os.Stat(targetDir); err != nil {
 		if os.IsNotExist(err) && targetDir == "cookies" {
 			_ = os.MkdirAll(targetDir, 0o755)
 			fmt.Fprintf(os.Stderr, "created %s/ folder; drop your cookie files here\n", targetDir)
 			os.Exit(0)
 		}
 		fatal(err)
-	}
-	if len(paths) == 0 {
-		fmt.Fprintf(os.Stderr, "no cookie files found in %s matching %s\n", targetDir, *pattern)
-		os.Exit(0)
-	}
-
-	// Parse everything up front: fast, local
-	parsed := make([]*cookie.CookieFile, len(paths))
-	for i, p := range paths {
-		cf, err := cookie.ParseCookieFile(p)
-		if err != nil {
-			cf = &cookie.CookieFile{Path: p, Err: err}
-		}
-		parsed[i] = cf
 	}
 
 	// Load & verify proxies
@@ -362,51 +348,46 @@ func Run() {
 		return path
 	}
 
-	results := make(chan validator.Result, len(paths))
-	jobs := make(chan int, len(paths))
-	var wg sync.WaitGroup
+	// Stream files: producer walks disk, workers consume and parse on-demand
+	pathsChan := make(chan string, 1024)
+	resultsChan := make(chan validator.Result, 1024)
+	var totalDiscovered atomic.Int64
+	var discoveryDone atomic.Bool
 
-	for range workers {
+	go func() {
+		_ = cookie.StreamCookieFiles(context.Background(), targetDir, *pattern, pathsChan, &totalDiscovered, &discoveryDone)
+	}()
+
+	var wg sync.WaitGroup
+	for workerID := range workers {
 		wg.Add(1)
-		go func() {
+		go func(wid int) {
 			defer wg.Done()
-			for i := range jobs {
-				cf := parsed[i]
-				res := validator.CheckCookieFile(context.Background(), cf, pickFor(i), timeout, endpointNorm)
+			for p := range pathsChan {
+				cf, err := cookie.ParseCookieFile(p)
+				if err != nil {
+					cf = &cookie.CookieFile{Path: p, Err: err}
+				}
+				res := validator.CheckCookieFile(context.Background(), cf, pickFor(wid), timeout, endpointNorm)
 				switch res.Status {
 				case validator.StatusValid:
 					res.MovedPath = moveTo(cf.Path, validDir)
 				case validator.StatusInvalid, validator.StatusExpired:
 					res.MovedPath = moveTo(cf.Path, invalidDir)
 				default:
-					// Network retry or empty files are kept in place without moving
 					res.MovedPath = cf.Path
 				}
-				results <- res
+				resultsChan <- res
 			}
-		}()
+		}(workerID)
 	}
 
 	go func() {
-		for i, cf := range parsed {
-			if cf.Err != nil {
-				res := validator.Result{
-					Path:      cf.Path,
-					MovedPath: cf.Path,
-					Status:    validator.StatusParseError,
-					Detail:    cf.Err.Error(),
-				}
-				results <- res
-				continue
-			}
-			jobs <- i
-		}
-		close(jobs)
 		wg.Wait()
-		close(results)
+		close(resultsChan)
 	}()
 
-	if err := tui.Run(paths, parsed, endpointNorm, proxyMode, len(proxies), workers, results); err != nil {
+	if err := tui.Run(endpointNorm, proxyMode, len(proxies), workers, &totalDiscovered, &discoveryDone, resultsChan); err != nil {
 		fatal(err)
 	}
 }

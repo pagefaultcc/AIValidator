@@ -201,14 +201,10 @@ func newScanner(proxies []proxy.Proxy, mode string, workers int, timeout time.Du
 			return nil, nil, nil, err
 		}
 
-		// Parse everything up front: fast, local.
+		// Fast lightweight initialization (no heavy upfront disk I/O)
 		parsed := make([]*cookie.CookieFile, len(paths))
 		for i, p := range paths {
-			cf, err := cookie.ParseNetscapeFile(p)
-			if err != nil {
-				cf = &cookie.CookieFile{Path: p, Err: err}
-			}
-			parsed[i] = cf
+			parsed[i] = &cookie.CookieFile{Path: p}
 		}
 
 		// Proxy selection per file. Sticky pins file i to proxies[i%len];
@@ -237,7 +233,10 @@ func newScanner(proxies []proxy.Proxy, mode string, workers int, timeout time.Du
 			go func() {
 				defer wg.Done()
 				for i := range jobs {
-					cf := parsed[i]
+					cf, err := cookie.ParseNetscapeFile(paths[i])
+					if err != nil {
+						cf = &cookie.CookieFile{Path: paths[i], Err: err}
+					}
 					res := validator.CheckCookieFile(context.Background(), cf, pickFor(i), timeout, endpoint)
 					if res.Status == validator.StatusValid {
 						res.MovedPath = moveTo(cf.Path, validDir)
@@ -249,17 +248,7 @@ func newScanner(proxies []proxy.Proxy, mode string, workers int, timeout time.Du
 			}()
 		}
 		go func() {
-			for i, cf := range parsed {
-				if cf.Err != nil {
-					res := validator.Result{
-						Path:      cf.Path,
-						MovedPath: moveTo(cf.Path, invalidDir),
-						Status:    validator.StatusParseError,
-						Detail:    cf.Err.Error(),
-					}
-					results <- res
-					continue
-				}
+			for i := range paths {
 				jobs <- i
 			}
 			close(jobs)
