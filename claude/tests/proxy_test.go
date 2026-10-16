@@ -1,19 +1,21 @@
-package main
+package tests
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"claude-validator/pkg/proxy"
 )
 
-func load(t *testing.T, content string) ([]Proxy, error) {
+func load(t *testing.T, content string) ([]proxy.Proxy, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "proxies.txt")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return LoadProxies(path)
+	return proxy.LoadProxies(path)
 }
 
 func TestLoadProxiesFormats(t *testing.T) {
@@ -54,7 +56,7 @@ func TestLoadProxiesMultiple(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(proxies) != 2 || proxyLabel(&proxies[0]) != "a:1" || proxyLabel(&proxies[1]) != "b:2" {
+	if len(proxies) != 2 || proxy.ProxyLabel(&proxies[0]) != "a:1" || proxy.ProxyLabel(&proxies[1]) != "b:2" {
 		t.Errorf("got %+v", proxies)
 	}
 }
@@ -88,13 +90,13 @@ func TestLoadProxiesEmptyFile(t *testing.T) {
 }
 
 func TestLoadProxiesMissingFile(t *testing.T) {
-	if _, err := LoadProxies(filepath.Join(t.TempDir(), "nope.txt")); err == nil {
+	if _, err := proxy.LoadProxies(filepath.Join(t.TempDir(), "nope.txt")); err == nil {
 		t.Error("expected error for missing file")
 	}
 }
 
 func TestProxyLabelNil(t *testing.T) {
-	if proxyLabel(nil) != "" {
+	if proxy.ProxyLabel(nil) != "" {
 		t.Error("nil proxy label should be empty")
 	}
 }

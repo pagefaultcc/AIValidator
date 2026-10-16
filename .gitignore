@@ -1,18 +1,29 @@
-# Secrets: cookie files carry real claude.ai session keys. Keep them ONLY in
-# the gitignored cookies/ directory — never commit them under any name.
-/cookies/
-
-# Belt-and-braces for stray cookie files anywhere else in the tree.
+# Secrets: cookie files carry real session keys. Never commit them under any name.
+cookies/
+**/cookies/
+valid/
+**/valid/
+invalid/
+**/invalid/
 cookie_*.txt
+**/cookie_*.txt
 message.txt
+**/message.txt
 *.cookies
+**/*.cookies
 
 # Build artifacts
-claude-validator
+/claude/claude-validator
+/claude/claude-validator.exe
+/claude-validator
+/claude-validator.exe
+*.exe
 /dist/
+**/dist/
 
 # macOS
 .DS_Store
+**/.DS_Store
 
 # Test scratch
 fixtures/

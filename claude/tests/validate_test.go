@@ -1,4 +1,4 @@
-package main
+package tests
 
 import (
 	"context"
@@ -9,6 +9,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"claude-validator/pkg/cookie"
+	"claude-validator/pkg/proxy"
+	"claude-validator/pkg/validator"
 )
 
 // hitCountingServer serves canned responses per path and counts hits per path.
@@ -31,9 +35,9 @@ func newTestServer(t *testing.T, handler func(path string, w http.ResponseWriter
 	return hs
 }
 
-func testFile(t *testing.T, sessionKey string, expiry int64) *CookieFile {
+func testFile(t *testing.T, sessionKey string, expiry int64) *cookie.CookieFile {
 	t.Helper()
-	cf := &CookieFile{Path: "test.txt", Cookies: map[string]string{"cf_clearance": "x"}}
+	cf := &cookie.CookieFile{Path: "test.txt", Cookies: map[string]string{"cf_clearance": "x"}}
 	if sessionKey != "" {
 		cf.Cookies["sessionKey"] = sessionKey
 		cf.SessionKeyExpires = time.Unix(expiry, 0)
@@ -41,9 +45,9 @@ func testFile(t *testing.T, sessionKey string, expiry int64) *CookieFile {
 	return cf
 }
 
-func check(t *testing.T, cf *CookieFile, endpoint string) Result {
+func check(t *testing.T, cf *cookie.CookieFile, endpoint string) validator.Result {
 	t.Helper()
-	return CheckCookieFile(context.Background(), cf, func() *Proxy { return nil }, 5*time.Second, endpoint)
+	return validator.CheckCookieFile(context.Background(), cf, func() *proxy.Proxy { return nil }, 5*time.Second, endpoint)
 }
 
 func orgsHandler(orgsJSON, accountJSON string) func(path string, w http.ResponseWriter, r *http.Request) {
@@ -64,7 +68,7 @@ const validAccountJSON = `{"email_address":"a@b.c","full_name":"A B","membership
 func TestCheckValid(t *testing.T) {
 	srv := newTestServer(t, orgsHandler(`[{"uuid":"u1","name":"Org One","extra":true},{"uuid":"u2","name":"Org Two"}]`, validAccountJSON))
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusValid {
+	if res.Status != validator.StatusValid {
 		t.Fatalf("status = %v, want VALID (detail %q)", res.Status, res.Detail)
 	}
 	if res.Email != "a@b.c" {
@@ -94,12 +98,12 @@ func TestPrechecksMakeNoHTTPRequests(t *testing.T) {
 	srv := newTestServer(t, orgsHandler(`[]`, `{}`))
 
 	res := check(t, testFile(t, "", 0), srv.URL) // no sessionKey
-	if res.Status != StatusInvalid || res.Detail != "missing sessionKey" {
+	if res.Status != validator.StatusInvalid || res.Detail != "missing sessionKey" {
 		t.Errorf("status = %v detail = %q", res.Status, res.Detail)
 	}
 
 	res = check(t, testFile(t, "sk", 1), srv.URL) // expired 1970
-	if res.Status != StatusExpired || !strings.Contains(res.Detail, "1970-01-01") {
+	if res.Status != validator.StatusExpired || !strings.Contains(res.Detail, "1970-01-01") {
 		t.Errorf("status = %v detail = %q", res.Status, res.Detail)
 	}
 
@@ -115,7 +119,7 @@ func TestCheckUnauthorized(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	})
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusInvalid || res.Detail != "unauthorized" {
+	if res.Status != validator.StatusInvalid || res.Detail != "unauthorized" {
 		t.Errorf("status = %v detail = %q", res.Status, res.Detail)
 	}
 }
@@ -127,7 +131,7 @@ func TestCheckBlockedHTMLChallenge(t *testing.T) {
 		w.Write([]byte("<!DOCTYPE html><title>Just a moment...</title>"))
 	})
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusBlocked || res.Detail != "cloudflare challenge" {
+	if res.Status != validator.StatusBlocked || res.Detail != "cloudflare challenge" {
 		t.Errorf("status = %v detail = %q", res.Status, res.Detail)
 	}
 }
@@ -140,7 +144,7 @@ func TestCheckBlockedCfMitigatedHeader(t *testing.T) {
 		w.Write([]byte(`{"error":"challenge"}`))
 	})
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusBlocked || res.Detail != "cloudflare challenge" {
+	if res.Status != validator.StatusBlocked || res.Detail != "cloudflare challenge" {
 		t.Errorf("status = %v detail = %q", res.Status, res.Detail)
 	}
 }
@@ -154,7 +158,7 @@ func TestCheckForbiddenJSONSessionInvalid(t *testing.T) {
 		w.Write([]byte(`{"type":"error","error":{"type":"permission_error","message":"Invalid authorization","details":{"error_code":"account_session_invalid"}}}`))
 	})
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusInvalid {
+	if res.Status != validator.StatusInvalid {
 		t.Errorf("status = %v, want INVALID", res.Status)
 	}
 	if !strings.Contains(res.Detail, "invalid authorization") || !strings.Contains(res.Detail, "account_session_invalid") {
@@ -171,7 +175,7 @@ func TestCheckForbiddenJSONWithoutChallenge(t *testing.T) {
 		w.Write([]byte(`{"type":"error"}`))
 	})
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusError || res.Detail != "HTTP 403" {
+	if res.Status != validator.StatusError || res.Detail != "HTTP 403" {
 		t.Errorf("status = %v detail = %q", res.Status, res.Detail)
 	}
 }
@@ -181,7 +185,7 @@ func TestCheckRateLimited(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusRateLimited {
+	if res.Status != validator.StatusRateLimited {
 		t.Errorf("status = %v", res.Status)
 	}
 }
@@ -192,7 +196,7 @@ func TestCheckServerErrors(t *testing.T) {
 			w.WriteHeader(code)
 		})
 		res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-		if res.Status != StatusError || res.Detail != fmt.Sprintf("HTTP %d", code) {
+		if res.Status != validator.StatusError || res.Detail != fmt.Sprintf("HTTP %d", code) {
 			t.Errorf("code %d: status = %v detail = %q", code, res.Status, res.Detail)
 		}
 	}
@@ -201,7 +205,7 @@ func TestCheckServerErrors(t *testing.T) {
 func TestCheckTransportError(t *testing.T) {
 	// Endpoint points at a closed port: transport error, no panic.
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), "http://127.0.0.1:1")
-	if res.Status != StatusError || res.Detail == "" {
+	if res.Status != validator.StatusError || res.Detail == "" {
 		t.Errorf("status = %v detail = %q", res.Status, res.Detail)
 	}
 }
@@ -210,7 +214,7 @@ func TestCheckOrgsNotArray(t *testing.T) {
 	// 200 with a JSON object instead of an array: must not be VALID.
 	srv := newTestServer(t, orgsHandler(`{"unexpected":"shape"}`, validAccountJSON))
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusError || res.Detail != "unexpected response shape" {
+	if res.Status != validator.StatusError || res.Detail != "unexpected response shape" {
 		t.Errorf("status = %v detail = %q", res.Status, res.Detail)
 	}
 }
@@ -224,7 +228,7 @@ func TestCheckAccountFailureDoesNotDowngrade(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusValid {
+	if res.Status != validator.StatusValid {
 		t.Fatalf("status = %v, want VALID", res.Status)
 	}
 	if res.Orgs != "Org One" {
@@ -246,7 +250,7 @@ func TestCheckAccountRateLimitedKeepsValid(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusValid {
+	if res.Status != validator.StatusValid {
 		t.Fatalf("status = %v, want VALID", res.Status)
 	}
 	if res.Detail != "account lookup: HTTP 429" {
@@ -257,7 +261,7 @@ func TestCheckAccountRateLimitedKeepsValid(t *testing.T) {
 func TestCheckAccountMissingFieldsStayEmpty(t *testing.T) {
 	srv := newTestServer(t, orgsHandler(`[{"uuid":"u","name":"O"}]`, `{"unrelated":true}`))
 	res := check(t, testFile(t, "sk", time.Now().Unix()+3600), srv.URL)
-	if res.Status != StatusValid {
+	if res.Status != validator.StatusValid {
 		t.Fatalf("status = %v", res.Status)
 	}
 	if res.Email != "" || res.Plan != "" {
@@ -286,8 +290,10 @@ func TestCheckSendsBrowserHeadersAndCookies(t *testing.T) {
 }
 
 func TestStatusStringAll(t *testing.T) {
-	for _, s := range []Status{StatusPending, StatusValid, StatusInvalid, StatusExpired,
-		StatusRateLimited, StatusBlocked, StatusError, StatusParseError} {
+	for _, s := range []validator.Status{
+		validator.StatusPending, validator.StatusValid, validator.StatusInvalid, validator.StatusExpired,
+		validator.StatusRateLimited, validator.StatusBlocked, validator.StatusError, validator.StatusParseError,
+	} {
 		if s.String() == "" || s.String() == "UNKNOWN" {
 			t.Errorf("status %d has no string", s)
 		}

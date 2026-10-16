@@ -15,31 +15,32 @@ text. Built to check thousands of cookie files fast without retries.
 ## Commands
 
 ```sh
-go build ./...        # compile
-go vet ./...          # vet — must be clean before any commit
-go test ./...         # unit tests — must pass before any commit
-gofmt -w .            # format (goimports-style; run before committing)
-go run .             # validate files in cookies/ (default -dir) against live claude.ai
+go build ./...                 # compile all packages
+go build ./cmd/claude-validator # compile binary to claude-validator(.exe)
+go vet ./...                   # vet — must be clean before any commit
+go test ./...                  # unit tests — must pass before any commit
+gofmt -w .                     # format (goimports-style; run before committing)
+go run ./cmd/claude-validator  # validate files in cookies/ (default -dir) against live claude.ai
 ```
 
 Useful flags: `-dir` (file or folder; default `cookies/`), `-pattern` (default
-`cookie_*.txt`),
+`*` for all files in folder), `-valid-dir` (default `valid/`, folder for valid
+cookies), `-invalid-dir` (default `invalid/`, folder for invalid cookies),
 `-workers` (default 5), `-timeout` (default 30s, per request), `-proxies`
 (default `proxies.txt`, used only if the file exists), `-proxy-mode`
 (`sticky|rotating`), `-endpoint` (default `https://claude.ai`; exists so tests
 can point at a local server).
 
-## Layout (flat, package `main`)
+## Layout
 
-| File | Responsibility |
+| Directory / File | Responsibility |
 |---|---|
-| `main.go` | flags, discovery wiring, worker pool, proxy selection closures, program bootstrap |
-| `cookies.go` | Netscape parser + recursive discovery + cookie-header building |
-| `proxy.go` | proxy line auto-detection (4 formats), fail-fast loader, `NewClient`, pooled `clientFor` |
-| `validate.go` | status enum, `Result`, `CheckCookieFile`, HTTP classification switch, `apiErrorDetail` |
-| `tui.go` | Bubble Tea model: rows, spinner, channel-driven updates, capped rendering, plain output |
-| `*_test.go` | unit tests (httptest-based for classification) |
-
+| `cmd/claude-validator/main.go` | flags, discovery wiring, worker pool, proxy selection closures, bootstrap |
+| `pkg/cookie/cookie.go` | Netscape parser + recursive discovery + cookie-header building |
+| `pkg/proxy/proxy.go` | proxy line auto-detection (4 formats), fail-fast loader, `NewClient`, pooled `ClientFor` |
+| `pkg/validator/validator.go` | status enum, `Result`, `CheckCookieFile`, HTTP classification switch, `APIErrorDetail` |
+| `pkg/tui/tui.go` | Bubble Tea model: rows, spinner, channel-driven updates, capped rendering, plain output runner |
+| `tests/*_test.go` | unit tests in `/tests` (httptest-based for classification, parser tests, proxy tests) |
 ## Verified live-API facts (do not "fix" these back to assumptions)
 
 These were confirmed against production claude.ai; tests in `validate_test.go`

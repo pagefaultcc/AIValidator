@@ -1,6 +1,7 @@
-package main
+package cookie
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -67,6 +68,20 @@ func DiscoverCookieFiles(dir, pattern string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
+			name := d.Name()
+			if name == "valid" || name == "invalid" {
+				return filepath.SkipDir
+			}
+			if strings.HasPrefix(name, ".") && !strings.HasPrefix(pattern, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), ".") && !strings.HasPrefix(pattern, ".") {
+			return nil
+		}
+		if pattern == "" || pattern == "*" {
+			out = append(out, path)
 			return nil
 		}
 		if ok, _ := filepath.Match(pattern, d.Name()); ok {
@@ -80,11 +95,55 @@ func DiscoverCookieFiles(dir, pattern string) ([]string, error) {
 	return out, nil
 }
 
-// buildCookieHeader joins the parsed cookies the way a browser would send them.
-func buildCookieHeader(cookies map[string]string) string {
+// BuildCookieHeader joins the parsed cookies the way a browser would send them.
+func BuildCookieHeader(cookies map[string]string) string {
 	parts := make([]string, 0, len(cookies))
 	for name, value := range cookies {
 		parts = append(parts, name+"="+value)
 	}
 	return strings.Join(parts, "; ")
+}
+
+// UniqueDestPath returns a unique path in dir for base name.
+// If dir/base exists, it appends _1, _2, etc. before the file extension.
+func UniqueDestPath(dir, base string) string {
+	target := filepath.Join(dir, base)
+	if _, err := os.Stat(target); os.IsNotExist(err) {
+		return target
+	}
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("%s_%d%s", stem, i, ext)
+		target = filepath.Join(dir, name)
+		if _, err := os.Stat(target); os.IsNotExist(err) {
+			return target
+		}
+	}
+}
+
+// MoveFile moves a file from src to dst, creating any necessary parent directories.
+// It uses os.Rename where possible, falling back to copy+delete for cross-device
+// or file-lock compatibility.
+func MoveFile(src, dst string) error {
+	cleanSrc := filepath.Clean(src)
+	cleanDst := filepath.Clean(dst)
+	if cleanSrc == cleanDst {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(cleanDst), 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(cleanSrc, cleanDst); err == nil {
+		return nil
+	}
+	data, err := os.ReadFile(cleanSrc)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(cleanDst, data, 0o644); err != nil {
+		return err
+	}
+	_ = os.Remove(cleanSrc)
+	return nil
 }
