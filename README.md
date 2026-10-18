@@ -271,3 +271,23 @@ myuser:mypass@192.168.1.50:8080
 - Never commit real session cookies, tokens, or dumps into source control.
 - In both submodules, default cookie directories (`cookies/`, `valid/`, `invalid/`) and candidate files (`proxies.txt`, `*.cookies`, `valid_sessions.txt`) are excluded via `.gitignore`.
 - Test suites rely exclusively on local fixtures and standard library HTTP test servers (`httptest.NewServer`). No outbound network requests are made during test execution.
+
+---
+
+## Contributing
+
+1. Fork the repository and create a feature branch.
+2. Prioritize standard library packages over external dependencies.
+3. Verify code formatting and run unit tests prior to opening a pull request:
+   ```sh
+   cd claude && go test ./... && go vet ./...
+   cd ../chatgpt && go test ./... && go vet ./...
+   ```
+4. Run `gofmt -w .` on all modified Go files.
+5. Use Conventional Commits (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`). Never commit credentials, active proxies, or live session dumps.
+
+---
+
+## Authors
+
+Developed and maintained by **team pagefault** ([@pagefaultcc](https://github.com/pagefaultcc)).
